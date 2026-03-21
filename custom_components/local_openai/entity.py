@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import orjson
 import mimetypes
 import re
 import unicodedata
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Literal, cast
+from collections.abc import AsyncGenerator, Callable
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import demoji
 import openai
+import orjson
 import voluptuous as vol
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigSubentry
@@ -21,7 +22,6 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import llm
 from homeassistant.helpers.entity import Entity
 from openai import AsyncStream
-from pylatexenc.latex2text import LatexNodes2Text
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionChunk,
@@ -40,6 +40,7 @@ from openai.types.chat.chat_completion_message_function_tool_call_param import F
 from openai.types.responses.response_output_item import ImageGenerationCall
 from openai.types.shared_params import FunctionDefinition, ResponseFormatJSONSchema
 from openai.types.shared_params.response_format_json_schema import JSONSchema
+from pylatexenc.latex2text import LatexNodes2Text
 from voluptuous_openapi import convert
 
 from . import LocalAiConfigEntry
@@ -52,9 +53,8 @@ from .const import (
     CONF_TEMPERATURE,
     DOMAIN,
     GEMINI_MIME_TYPES_SUPPORTED,
-    LOGGER,
     LATEX_MATH_SPAN,
-    AUDIO_MIME_TYPE_MAP,
+    LOGGER,
     MAX_TOOL_ITERATIONS,
 )
 from .prompt import format_custom_prompt
@@ -71,9 +71,7 @@ def _sync_latex_to_text(text: str) -> str:
 
     def replace(match):
         span = match.group(0)
-        return LatexNodes2Text(
-            keep_comments=True, keep_braced_groups=True
-        ).latex_to_text(span)
+        return LatexNodes2Text(keep_comments=True, keep_braced_groups=True).latex_to_text(span)
 
     return LATEX_MATH_SPAN.sub(replace, text)
 
@@ -109,15 +107,12 @@ def _should_strip_emphasis(inner: str, previous: str, following: str) -> bool:
     ):
         return True
 
-    if (
+    return bool(
         leading_ws
         and not trailing_ws
         and leading_ws.strip() == ""
         and (_is_punctuation(previous) or previous.isspace() or not previous)
-    ):
-        return True
-
-    return False
+    )
 
 
 def _process_emphasis_block_content(
@@ -210,10 +205,7 @@ def _attachment_supported(mime_type: str) -> bool:
     if not mime_type:
         return False
 
-    if mime_type.lower() in GEMINI_MIME_TYPES_SUPPORTED:
-        return True
-
-    return False
+    return mime_type.lower() in GEMINI_MIME_TYPES_SUPPORTED
 
 
 def _adjust_schema(schema: dict[str, Any]) -> None:
@@ -254,9 +246,7 @@ def _format_structured_output(
     }
     result_schema = convert(
         schema,
-        custom_serializer=(
-            llm_api.custom_serializer if llm_api else llm.selector_serializer
-        ),
+        custom_serializer=(llm_api.custom_serializer if llm_api else llm.selector_serializer),
     )
 
     _adjust_schema(result_schema)
@@ -401,9 +391,7 @@ async def _convert_content_to_chat_message(
 
     role: Literal["user", "assistant", "system"] = content.role
     if role == "system" and content.content:
-        return ChatCompletionSystemMessageParam(
-            role="system", content=str(content.content)
-        )
+        return ChatCompletionSystemMessageParam(role="system", content=str(content.content))
 
     if role == "user":
         content_parts: list[ChatCompletionContentPartParam] = []
@@ -412,16 +400,16 @@ async def _convert_content_to_chat_message(
         if attachments:
             loop = asyncio.get_running_loop()
             for attachment in attachments:
-                raw_mime_type = (
+                mime_type = (
                     attachment.mime_type
                     or mimetypes.guess_type(str(attachment.path))[0]
                     or "application/octet-stream"
                 )
 
-                if not _attachment_supported(raw_mime_type):
+                if not _attachment_supported(mime_type):
                     LOGGER.debug(
                         "Unsupported attachment type '%s' for model '%s'",
-                        raw_mime_type,
+                        mime_type,
                         model,
                     )
                     raise HomeAssistantError(
@@ -429,31 +417,31 @@ async def _convert_content_to_chat_message(
                         translation_key="unsupported_attachment_type",
                     )
 
-                base64_file = await loop.run_in_executor(
-                    None, b64_file, attachment.path
-                )
-                mime_type = raw_mime_type.lower()
+                base64_file = await loop.run_in_executor(None, b64_file, attachment.path)
 
                 if mime_type.startswith("image/"):
                     content_parts.append(
                         ChatCompletionContentPartImageParam(
                             type="image_url",
                             image_url={
-                                "url": f"data:{raw_mime_type};base64,{base64_file}",
+                                "url": f"data:{mime_type};base64,{base64_file}",
                                 "detail": "auto",
                             },
                         )
                     )
                     continue
 
-                if (audio_format := AUDIO_MIME_TYPE_MAP.get(mime_type)) is not None:
-                    content_parts.append(
-                        ChatCompletionContentPartInputAudioParam(
-                            type="input_audio",
-                            input_audio={"format": audio_format, "data": base64_file},
+                if mime_type.startswith("audio/"):
+                    audio_format = mimetypes.guess_extension(mime_type)
+                    if audio_format and audio_format in (".mp3", ".wav"):
+                        audio_format = audio_format.split(".")[-1]
+                        content_parts.append(
+                            ChatCompletionContentPartInputAudioParam(
+                                type="input_audio",
+                                input_audio={"format": audio_format, "data": base64_file},
+                            )
                         )
-                    )
-                    continue
+                        continue
 
                 content_parts.append(
                     cast(
@@ -473,9 +461,7 @@ async def _convert_content_to_chat_message(
 
         if content.content:
             content_parts.append(
-                ChatCompletionContentPartTextParam(
-                    type="text", text=str(content.content)
-                )
+                ChatCompletionContentPartTextParam(type="text", text=str(content.content))
             )
 
         if content_parts:
@@ -493,9 +479,9 @@ async def _convert_content_to_chat_message(
                     type="function",
                     id=tool_call.id,
                     function=Function(
-                        arguments=orjson.dumps(
-                            _stringify_keys(tool_call.tool_args)
-                        ).decode("utf-8"),
+                        arguments=orjson.dumps(_stringify_keys(tool_call.tool_args)).decode(
+                            "utf-8"
+                        ),
                         name=tool_call.tool_name,
                     ),
                 )
@@ -520,7 +506,7 @@ async def _transform_stream(
     strip_emojis: bool,
     strip_emphasis: bool,
     strip_latex: bool,
-) -> AsyncGenerator[conversation.AssistantContentDeltaDict, None]:
+) -> AsyncGenerator[conversation.AssistantContentDeltaDict]:
     """Transform a streaming OpenAI response to ChatLog format."""
     new_msg = True
     pending_think = ""
@@ -549,9 +535,7 @@ async def _transform_stream(
             chunk["tool_calls"] = [
                 llm.ToolInput(
                     tool_name=tool_call["name"],
-                    tool_args=orjson.loads(tool_call["args"])
-                    if tool_call["args"]
-                    else {},
+                    tool_args=orjson.loads(tool_call["args"]) if tool_call["args"] else {},
                 )
                 for tool_call in pending_tool_calls
                 if tool_call["name"]
@@ -586,9 +570,7 @@ async def _transform_stream(
 
             if strip_emphasis and content:
                 pending_emphasis += content
-                content, pending_emphasis = _consume_emphasis(
-                    pending_emphasis, flush=False
-                )
+                content, pending_emphasis = _consume_emphasis(pending_emphasis, flush=False)
             elif not strip_emphasis:
                 pending_emphasis = ""
             elif not content:
@@ -609,9 +591,7 @@ async def _transform_stream(
                         content_segments.append(flushed_latex)
 
             if strip_emphasis and pending_emphasis:
-                flushed, pending_emphasis = _consume_emphasis(
-                    pending_emphasis, flush=True
-                )
+                flushed, pending_emphasis = _consume_emphasis(pending_emphasis, flush=True)
                 if flushed:
                     content_segments.append(flushed)
 
@@ -711,13 +691,9 @@ class LocalAiEntity(Entity):
         ]
 
         if options.get(CONF_MANUAL_PROMPTING, False) and user_input:
-            prompt = format_custom_prompt(
-                self.hass, options.get(CONF_PROMPT), user_input, tools
-            )
+            prompt = format_custom_prompt(self.hass, options.get(CONF_PROMPT), user_input, tools)
             # Find the first system message to replace it, or insert at the beginning
-            new_system_message = ChatCompletionSystemMessageParam(
-                role="system", content=prompt
-            )
+            new_system_message = ChatCompletionSystemMessageParam(role="system", content=prompt)
             found = False
             for i, msg in enumerate(messages):
                 if msg["role"] == "system":
@@ -749,9 +725,7 @@ class LocalAiEntity(Entity):
                 assert structure_name is not None
             model_args["response_format"] = ResponseFormatJSONSchema(
                 type="json_schema",
-                json_schema=_format_structured_output(
-                    structure_name, structure, chat_log.llm_api
-                ),
+                json_schema=_format_structured_output(structure_name, structure, chat_log.llm_api),
             )
 
         client = self.entry.runtime_data
@@ -759,9 +733,7 @@ class LocalAiEntity(Entity):
         for _iteration in range(MAX_TOOL_ITERATIONS):
             LOGGER.debug("Sending chat request to API with payload: %s", model_args)
             try:
-                result_stream = await client.chat.completions.create(
-                    **model_args, stream=True
-                )
+                result_stream = await client.chat.completions.create(**model_args, stream=True)
             except openai.OpenAIError as err:
                 LOGGER.error("Error requesting response from API: %s", err)
                 raise HomeAssistantError(f"Error talking to API: {err}") from err
@@ -776,11 +748,7 @@ class LocalAiEntity(Entity):
                                 result_stream, strip_emojis, strip_emphasis, strip_latex
                             ),
                         )
-                        if (
-                            msg := await _convert_content_to_chat_message(
-                                content, self.model
-                            )
-                        )
+                        if (msg := await _convert_content_to_chat_message(content, self.model))
                     ]
                 )
             except Exception as err:  # pylint: disable=broad-except

@@ -36,9 +36,7 @@ DEFAULT_EXTRA_ATTRIBUTES_TO_EXPOSE = [
 ]
 
 
-CSS3_NAME_TO_RGB = {
-    name: webcolors.name_to_rgb(name, CSS3) for name in webcolors.names(CSS3)
-}
+CSS3_NAME_TO_RGB = {name: webcolors.name_to_rgb(name, CSS3) for name in webcolors.names(CSS3)}
 
 
 def closest_color(requested_color):
@@ -93,7 +91,7 @@ def get_entities(hass) -> list:
                 result.append(str(value))
         return result
 
-    entities_to_expose, domains = get_exposed_entities(hass)
+    entities_to_expose, _domains = get_exposed_entities(hass)
     devices = []
     formatted_devices = ""
 
@@ -101,11 +99,10 @@ def get_entities(hass) -> list:
     for name, attributes in entities_to_expose.items():
         state = attributes["state"]
         exposed_attributes = expose_attributes(attributes)
-        str_attributes = ";".join([state] + exposed_attributes)
+        str_attributes = ";".join([state, *exposed_attributes])
 
         formatted_devices = (
-            formatted_devices
-            + f"{name} '{attributes.get('friendly_name')}' = {str_attributes}\n"
+            formatted_devices + f"{name} '{attributes.get('friendly_name')}' = {str_attributes}\n"
         )
         device_attribs = {
             "entity_id": name,
@@ -154,9 +151,7 @@ def get_exposed_entities(hass) -> tuple[dict[str, dict[str, Any]], list[str]]:
                 attributes["aliases"] = entity.aliases
 
             if entity.unit_of_measurement:
-                attributes["state"] = (
-                    attributes["state"] + " " + entity.unit_of_measurement
-                )
+                attributes["state"] = attributes["state"] + " " + entity.unit_of_measurement
 
         # area could be on device or entity. prefer device area
         area_id = None

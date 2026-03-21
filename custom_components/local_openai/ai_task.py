@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
-import orjson
 
+import orjson
 from homeassistant.components import ai_task, conversation
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -69,9 +69,7 @@ class LocalAITaskEntity(
         await self._async_handle_chat_log(chat_log, task.name, task.structure)
 
         if not isinstance(chat_log.content[-1], conversation.AssistantContent):
-            raise HomeAssistantError(
-                "Last content in chat log is not an AssistantContent"
-            )
+            raise HomeAssistantError("Last content in chat log is not an AssistantContent")
 
         text = chat_log.content[-1].content or ""
         LOGGER.debug("Raw text content from LLM for GenDataTask: %s", text)
@@ -102,9 +100,7 @@ class LocalAITaskEntity(
         await self._async_handle_chat_log(chat_log, task.name, force_image=True)
 
         if not isinstance(chat_log.content[-1], conversation.AssistantContent):
-            raise HomeAssistantError(
-                "Last content in chat log is not an AssistantContent"
-            )
+            raise HomeAssistantError("Last content in chat log is not an AssistantContent")
 
         image_call: ImageGenerationCall | None = None
         for content in reversed(chat_log.content):
@@ -138,7 +134,7 @@ class LocalAITaskEntity(
                 width_str, height_str = str(size).split("x")
                 width = int(width_str)
                 height = int(height_str)
-            except (ValueError, AttributeError):
+            except ValueError, AttributeError:
                 width = height = None
 
         revised_prompt = getattr(image_call, "revised_prompt", None)

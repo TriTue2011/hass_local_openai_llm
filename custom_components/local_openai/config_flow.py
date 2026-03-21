@@ -36,16 +36,16 @@ from openai import AsyncOpenAI, OpenAIError
 
 from .const import (
     CONF_BASE_URL,
+    CONF_GENERATE_DATA,
+    CONF_GENERATE_IMAGE,
     CONF_MANUAL_PROMPTING,
     CONF_PARALLEL_TOOL_CALLS,
     CONF_SERVER_NAME,
     CONF_STRIP_EMOJIS,
     CONF_STRIP_EMPHASIS,
     CONF_STRIP_LATEX,
-    CONF_TEMPERATURE,
-    CONF_GENERATE_DATA,
-    CONF_GENERATE_IMAGE,
     CONF_SUPPORT_ATTACHMENTS,
+    CONF_TEMPERATURE,
     DOMAIN,
     LOGGER,
     RECOMMENDED_CONVERSATION_OPTIONS,
@@ -68,17 +68,13 @@ class LocalAiConfigFlow(ConfigFlow, domain=DOMAIN):
             "ai_task_data": AITaskDataFlowHandler,
         }
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step."""
         LOGGER.debug("Config flow: step_user, input: %s", user_input)
         errors = {}
         if user_input is not None:
             self._async_abort_entries_match(user_input)
-            LOGGER.debug(
-                f"Initialising OpenAI client with base_url: {user_input[CONF_BASE_URL]}"
-            )
+            LOGGER.debug(f"Initialising OpenAI client with base_url: {user_input[CONF_BASE_URL]}")
 
             try:
                 client = AsyncOpenAI(
@@ -180,9 +176,7 @@ class ConversationFlowHandler(LocalAiSubentryFlowHandler):
                 ),
                 vol.Optional(
                     CONF_PROMPT,
-                    default=options.get(
-                        CONF_PROMPT, RECOMMENDED_CONVERSATION_OPTIONS[CONF_PROMPT]
-                    ),
+                    default=options.get(CONF_PROMPT, RECOMMENDED_CONVERSATION_OPTIONS[CONF_PROMPT]),
                 ): TemplateSelector(),
                 vol.Optional(
                     CONF_LLM_HASS_API,
@@ -190,9 +184,7 @@ class ConversationFlowHandler(LocalAiSubentryFlowHandler):
                         CONF_LLM_HASS_API,
                         RECOMMENDED_CONVERSATION_OPTIONS[CONF_LLM_HASS_API],
                     ),
-                ): SelectSelector(
-                    SelectSelectorConfig(options=llm_apis, multiple=True)
-                ),
+                ): SelectSelector(SelectSelectorConfig(options=llm_apis, multiple=True)),
                 vol.Optional(
                     CONF_PARALLEL_TOOL_CALLS,
                     default=options.get(CONF_PARALLEL_TOOL_CALLS, True),
@@ -217,16 +209,12 @@ class ConversationFlowHandler(LocalAiSubentryFlowHandler):
                     CONF_TEMPERATURE,
                     default=options.get(CONF_TEMPERATURE, 1),
                 ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=0, max=1, step=0.05, mode=NumberSelectorMode.SLIDER
-                    )
+                    NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.SLIDER)
                 ),
             }
         )
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         """User flow to create a sensor subentry."""
         if user_input is not None:
             user_input = user_input.copy()
@@ -355,16 +343,12 @@ class AITaskDataFlowHandler(LocalAiSubentryFlowHandler):
                     CONF_TEMPERATURE,
                     default=options.get(CONF_TEMPERATURE, 1),
                 ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=0, max=1, step=0.05, mode=NumberSelectorMode.SLIDER
-                    )
+                    NumberSelectorConfig(min=0, max=1, step=0.05, mode=NumberSelectorMode.SLIDER)
                 ),
             }
         )
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         """User flow to create a sensor subentry."""
         if user_input is not None:
             user_input = user_input.copy()

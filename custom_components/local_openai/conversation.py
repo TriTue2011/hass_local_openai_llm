@@ -39,9 +39,7 @@ class LocalAiConversationEntity(LocalAiEntity, conversation.ConversationEntity):
         """Initialize the agent."""
         super().__init__(entry, subentry)
         if self.subentry.data.get(CONF_LLM_HASS_API):
-            self._attr_supported_features = (
-                conversation.ConversationEntityFeature.CONTROL
-            )
+            self._attr_supported_features = conversation.ConversationEntityFeature.CONTROL
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
