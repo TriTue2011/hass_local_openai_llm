@@ -69,12 +69,10 @@ def get_entities(hass) -> list:
 
             value = _attributes[attribute_name]
             if value is not None:
-                # try to apply unit if present
                 unit_suffix = _attributes.get(f"{attribute_name}_unit")
                 if unit_suffix:
                     value = f"{value} {unit_suffix}"
                 elif attribute_name == "temperature":
-                    # try to get unit or guess otherwise
                     suffix = _attributes.get("unit_of_measurement")
                     if not suffix:
                         suffix = "°F" if value > 50 else "°C"
@@ -95,7 +93,6 @@ def get_entities(hass) -> list:
     devices = []
     formatted_devices = ""
 
-    # expose devices and their alias as well
     for name, attributes in entities_to_expose.items():
         state = attributes["state"]
         exposed_attributes = expose_attributes(attributes)
@@ -153,7 +150,6 @@ def get_exposed_entities(hass) -> tuple[dict[str, dict[str, Any]], list[str]]:
             if entity.unit_of_measurement:
                 attributes["state"] = attributes["state"] + " " + entity.unit_of_measurement
 
-        # area could be on device or entity. prefer device area
         area_id = None
         if device and device.area_id:
             area_id = device.area_id
@@ -161,7 +157,7 @@ def get_exposed_entities(hass) -> tuple[dict[str, dict[str, Any]], list[str]]:
             area_id = entity.area_id
 
         if area_id:
-            area = area_registry.async_get_area(entity.area_id)
+            area = area_registry.async_get_area(area_id)
             if area:
                 attributes["area_id"] = area.id
                 attributes["area_name"] = area.name
@@ -198,7 +194,6 @@ def format_custom_prompt(hass, agent_prompt: str, user_input, tools):
         device_name,
     )
 
-    # Render prompt
     rendered_prompt = template.Template(
         agent_prompt,
         hass,

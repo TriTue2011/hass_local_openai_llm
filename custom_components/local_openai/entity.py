@@ -115,15 +115,13 @@ def _should_strip_emphasis(inner: str, previous: str, following: str) -> bool:
     )
 
 
-def _process_emphasis_block_content(
-    buffer: str, start: int, flush: bool
-) -> tuple[str, int] | tuple[None, None]:
+def _process_emphasis_block_content(buffer: str, start: int, flush: bool) -> tuple[str, int] | None:
     """Processes an emphasis block, returns content and new index."""
     end = buffer.find("**", start + 2)
     if end == -1:
         if flush:
             return buffer[start:], len(buffer)
-        return None, None  # unclosed
+        return None
 
     inner = buffer[start + 2 : end]
     prev_char = buffer[start - 1] if start > 0 else ""
@@ -151,9 +149,10 @@ def _consume_emphasis(buffer: str, flush: bool = False) -> tuple[str, str]:
 
         output_parts.append(buffer[idx:next_emphasis])
 
-        content, new_idx = _process_emphasis_block_content(buffer, next_emphasis, flush)
-        if content is None:
+        processed = _process_emphasis_block_content(buffer, next_emphasis, flush)
+        if processed is None:
             return "".join(output_parts), buffer[next_emphasis:]
+        content, new_idx = processed
         output_parts.append(content)
         idx = new_idx
 
@@ -217,7 +216,6 @@ def _adjust_schema(schema: dict[str, Any]) -> None:
         if "required" not in schema:
             schema["required"] = []
 
-        # Ensure all properties are required
         for prop, prop_info in schema["properties"].items():
             _adjust_schema(prop_info)
             if prop not in schema["required"]:
@@ -287,6 +285,8 @@ def _convert_completion_content_part_to_response_input(
         if detail:
             image_entry["detail"] = detail
         return image_entry
+    if part["type"] == "refusal":
+        return {"type": "input_text", "text": part["refusal"]}
     return {"type": "input_text", "text": ""}
 
 
@@ -298,17 +298,19 @@ def _convert_completion_messages_to_response_input(
     for message in messages:
         role = message["role"]
         if role == "system":
+            msg = cast("ChatCompletionSystemMessageParam", message)
             response_messages.append(
                 {
                     "type": "message",
                     "role": "developer",
-                    "content": message.get("content") or "",
+                    "content": msg.get("content") or "",
                 }
             )
             continue
 
         if role == "user":
-            content = message.get("content")
+            msg = cast("ChatCompletionUserMessageParam", message)
+            content = msg.get("content")
             if isinstance(content, list):
                 response_messages.append(
                     {
@@ -331,21 +333,23 @@ def _convert_completion_messages_to_response_input(
             continue
 
         if role == "assistant":
+            msg = cast("ChatCompletionAssistantMessageParam", message)
             response_messages.append(
                 {
                     "type": "message",
                     "role": "assistant",
-                    "content": message.get("content") or "",
+                    "content": msg.get("content") or "",
                 }
             )
-            tool_calls = message.get("tool_calls")
+            tool_calls = msg.get("tool_calls")
             if tool_calls:
                 for tool_call in tool_calls:
+                    function = cast("dict[str, Any]", tool_call.get("function"))
                     response_messages.append(
                         {
                             "type": "function_call",
-                            "name": tool_call["function"]["name"],
-                            "arguments": tool_call["function"]["arguments"],
+                            "name": function["name"],
+                            "arguments": function["arguments"],
                             "call_id": tool_call["id"],
                         }
                     )
@@ -355,7 +359,7 @@ def _convert_completion_messages_to_response_input(
             response_messages.append(
                 {
                     "type": "function_call_output",
-                    "call_id": message["tool_call_id"],
+                    "call_id": cast("ChatCompletionToolMessageParam", message)["tool_call_id"],
                     "output": message.get("content") or "",
                 }
             )
@@ -473,6 +477,9 @@ async def _convert_content_to_chat_message(
             role="assistant",
             content=content.content,
         )
+        if (thinking := getattr(content, "thinking_content", None)) is not None:
+            cast(dict[str, Any], cast(object, param))["reasoning_content"] = thinking
+
         if isinstance(content, conversation.AssistantContent) and content.tool_calls:
             param["tool_calls"] = [
                 ChatCompletionMessageFunctionToolCallParam(
@@ -525,6 +532,9 @@ async def _transform_stream(
         choice = event.choices[0]
         delta = choice.delta
 
+        if (reasoning := getattr(delta, "reasoning_content", None)) is not None:
+            chunk["thinking_content"] = reasoning
+
         if new_msg:
             chunk["role"] = cast("Literal['assistant']", delta.role)
             new_msg = False
@@ -549,10 +559,10 @@ async def _transform_stream(
                     pending_tool_calls.append({"name": "", "args": ""})
 
                 entry = pending_tool_calls[index]
-                if not entry["name"]:
+                if not entry["name"] and tool_call.function:
                     entry["name"] = tool_call.function.name
 
-                if tool_call.function.arguments:
+                if tool_call.function and tool_call.function.arguments:
                     entry["args"] += tool_call.function.arguments
 
         content_segments: list[str] = []
@@ -597,12 +607,7 @@ async def _transform_stream(
 
         visible_output = ""
         for segment in content_segments:
-            # Buffer against partial tags like <th... or </th...
             text_to_process = segment
-
-            # If we see a potential starting of a tag at the very end of segment,
-            # we might want to buffer it, but <think> is long enough that
-            # we usually get it in chunks. For now, we process accurately:
 
             if "<think>" in text_to_process:
                 before, after = text_to_process.split("<think>", 1)
@@ -691,8 +696,9 @@ class LocalAiEntity(Entity):
         ]
 
         if options.get(CONF_MANUAL_PROMPTING, False) and user_input:
-            prompt = format_custom_prompt(self.hass, options.get(CONF_PROMPT), user_input, tools)
-            # Find the first system message to replace it, or insert at the beginning
+            prompt = format_custom_prompt(
+                self.hass, options.get(CONF_PROMPT, ""), user_input, tools
+            )
             new_system_message = ChatCompletionSystemMessageParam(role="system", content=prompt)
             found = False
             for i, msg in enumerate(messages):
@@ -751,7 +757,7 @@ class LocalAiEntity(Entity):
                         if (msg := await _convert_content_to_chat_message(content, self.model))
                     ]
                 )
-            except Exception as err:  # pylint: disable=broad-except
+            except Exception as err:
                 LOGGER.exception("Error handling API response: %s", err)
                 break
 
