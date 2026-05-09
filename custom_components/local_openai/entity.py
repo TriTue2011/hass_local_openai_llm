@@ -677,7 +677,6 @@ class LocalAiEntity(Entity):
 
         model_args: dict[str, Any] = {
             "model": self.model,
-            "prompt_cache_key": chat_log.conversation_id,
             "temperature": temperature,
             "parallel_tool_calls": parallel_tool_calls,
         }
@@ -743,6 +742,9 @@ class LocalAiEntity(Entity):
             except openai.OpenAIError as err:
                 LOGGER.error("Error requesting response from API: %s", err)
                 raise HomeAssistantError(f"Error talking to API: {err}") from err
+            except TypeError as err:
+                LOGGER.error("TypeError calling API with payload=%s: %s", model_args, err)
+                raise HomeAssistantError(f"Error talking to API: {err}") from err
 
             try:
                 model_args["messages"].extend(
@@ -761,8 +763,98 @@ class LocalAiEntity(Entity):
                 LOGGER.exception("Error handling API response: %s", err)
                 break
 
+            # 9Router-compatible fallback: stream may complete but not produce
+            # a valid AssistantContent in chat_log.
+            if not chat_log.content or not isinstance(chat_log.content[-1], conversation.AssistantContent):
+                LOGGER.warning("Stream ended without AssistantContent, fallback to non-stream")
+                try:
+                    fallback_resp = await client.chat.completions.create(**model_args, stream=False)
+                except openai.OpenAIError as err:
+                    LOGGER.error("Fallback non-stream request failed: %s", err)
+                    raise HomeAssistantError(f"Error talking to API: {err}") from err
+                except TypeError as err:
+                    LOGGER.error("Fallback non-stream TypeError: %s", err)
+                    raise HomeAssistantError(f"Error talking to API: {err}") from err
+
+                choice = fallback_resp.choices[0] if getattr(fallback_resp, "choices", None) else None
+                message = getattr(choice, "message", None) if choice else None
+                content = getattr(message, "content", None) if message else None
+                if isinstance(content, str):
+                    fallback_text = content
+                elif isinstance(content, list):
+                    fallback_text = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                else:
+                    fallback_text = ""
+
+                if strip_emojis and fallback_text:
+                    fallback_text = await _strip_emojis(fallback_text)
+                if strip_latex and fallback_text:
+                    fallback_text = await _latex_to_text(fallback_text)
+                if strip_emphasis and fallback_text:
+                    fallback_text, _ = _consume_emphasis(fallback_text, flush=True)
+
+                fallback_text = fallback_text.strip()
+                if not fallback_text:
+                    raise HomeAssistantError(
+                        "Model returned empty content in both stream and non-stream modes"
+                    )
+
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=fallback_text,
+                    )
+                )
+                msg = await _convert_content_to_chat_message(chat_log.content[-1], self.model)
+                if msg is not None:
+                    model_args["messages"].append(msg)
+
             if not chat_log.unresponded_tool_results:
                 break
+
+        # Final safety fallback for 9Router/OpenAI-compatible gateways:
+        # ensure chat log always ends with AssistantContent.
+        if not chat_log.content or not isinstance(chat_log.content[-1], conversation.AssistantContent):
+            LOGGER.warning("Final safety fallback: forcing non-stream completion")
+            try:
+                fallback_resp = await client.chat.completions.create(**model_args, stream=False)
+            except Exception as err:
+                LOGGER.error("Final safety fallback failed: %s", err)
+                raise HomeAssistantError(f"Error talking to API: {err}") from err
+
+            choice = fallback_resp.choices[0] if getattr(fallback_resp, "choices", None) else None
+            message = getattr(choice, "message", None) if choice else None
+            content = getattr(message, "content", None) if message else None
+            if isinstance(content, str):
+                fallback_text = content
+            elif isinstance(content, list):
+                fallback_text = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            else:
+                fallback_text = ""
+
+            if strip_emojis and fallback_text:
+                fallback_text = await _strip_emojis(fallback_text)
+            if strip_latex and fallback_text:
+                fallback_text = await _latex_to_text(fallback_text)
+            if strip_emphasis and fallback_text:
+                fallback_text, _ = _consume_emphasis(fallback_text, flush=True)
+
+            fallback_text = fallback_text.strip()
+            if not fallback_text:
+                raise HomeAssistantError("Model returned empty content after final safety fallback")
+
+            chat_log.async_add_assistant_content_without_tools(
+                conversation.AssistantContent(
+                    agent_id=self.entity_id,
+                    content=fallback_text,
+                )
+            )
 
     async def _async_handle_image_response(
         self,
@@ -773,13 +865,12 @@ class LocalAiEntity(Entity):
         strip_latex: bool,
         temperature: float,
     ) -> None:
-        """Generate an image response using the Responses API."""
+        """Generate an image response (prefer /v1/images/generations for 9Router)."""
         response_input = _convert_completion_messages_to_response_input(messages)
 
         model_args: dict[str, Any] = {
             "model": self.model,
             "input": response_input,
-            "prompt_cache_key": chat_log.conversation_id,
             "temperature": temperature,
             "stream": False,
             "store": True,
@@ -793,12 +884,71 @@ class LocalAiEntity(Entity):
             ],
         }
 
+        # Inject size into model_args for Responses API fallback
+        _image_size = "1792x1024"
+        model_args["size"] = _image_size
+
         client = self.entry.runtime_data
 
-        LOGGER.debug("Sending image generation request to API: %s", model_args)
+        prompt_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                prompt_text = content.strip()
+                if prompt_text:
+                    break
+            elif isinstance(content, list):
+                text_parts: list[str] = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_parts.append(str(part.get("text", "")))
+                prompt_text = "\n".join([p for p in text_parts if p]).strip()
+                if prompt_text:
+                    break
+
+        # 9Router first path: /v1/images/generations
+        if prompt_text:
+            try:
+                image_resp = await client.images.generate(
+                    model=self.model,
+                    prompt=prompt_text,
+                    response_format="b64_json",
+                    size=_image_size,
+                )
+                data = getattr(image_resp, "data", None) or []
+                first = data[0] if data else None
+                b64_json = getattr(first, "b64_json", None) if first else None
+                if not b64_json and isinstance(first, dict):
+                    b64_json = first.get("b64_json")
+                if b64_json:
+                    image_call = ImageGenerationCall.model_validate(
+                        {
+                            "type": "image_generation_call",
+                            "id": "images-generate-call",
+                            "status": "completed",
+                            "result": b64_json,
+                            "output_format": "png",
+                            "size": _image_size,
+                        }
+                    )
+                    chat_log.async_add_assistant_content_without_tools(
+                        conversation.AssistantContent(
+                            agent_id=self.entity_id,
+                            content=None,
+                            native=image_call,
+                        )
+                    )
+                    return
+                LOGGER.warning("/v1/images/generations returned without b64_json; fallback to Responses API")
+            except Exception as image_err:
+                LOGGER.warning("/v1/images/generations failed (%s); fallback to Responses API", image_err)
+
+        LOGGER.debug("Sending image generation request to Responses API: %s", model_args)
         try:
             response = await client.responses.create(**model_args)
-        except openai.OpenAIError as err:
+        except (openai.OpenAIError, TypeError) as err:
             LOGGER.error("Error requesting image response from API: %s", err)
             raise HomeAssistantError(f"Error talking to API: {err}") from err
 
